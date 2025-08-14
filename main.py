@@ -10,8 +10,9 @@ import streamlit as st
 from docx import Document
 from langchain.embeddings import OpenAIEmbeddings
 
-from mysecrets import OPENAI_API_KEY
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+# from mysecrets import OPENAI_API_KEY
+# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 from utils import (
     chunk_embed_store_transcript,
