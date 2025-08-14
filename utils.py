@@ -199,7 +199,7 @@ def export_to_word(chat_history, supporting_quotes):
     doc.add_heading("Decode Findings Export", 0)
     for i, (q, a) in enumerate(chat_history):
         doc.add_heading(f"Q{i+1}: {q}", level=1)
-        # Keep original points in the export; UI cleans repetition
+        # Keep original points in export; UI handles repetition removal
         points = split_insights_into_points(a)
         for j, point in enumerate(points):
             doc.add_heading(f"Insight {j+1}:", level=2)

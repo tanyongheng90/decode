@@ -4,16 +4,14 @@ import os
 import re
 import time
 from html import escape
-from io import StringIO
+from io import StringIO, BytesIO
 
-import docx2txt
 import streamlit as st
+from docx import Document
 from langchain.embeddings import OpenAIEmbeddings
 
-# from mysecrets import OPENAI_API_KEY
-# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY 
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
+from mysecrets import OPENAI_API_KEY
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 from utils import (
     chunk_embed_store_transcript,
@@ -28,14 +26,17 @@ from utils import (
 
 
 def parse_transcript(uploaded_file):
+    """Reads txt or docx using python-docx (no docx2txt dependency)."""
     if uploaded_file.type == "text/plain":
-        stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
-        transcript = stringio.read()
-    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        transcript = docx2txt.process(uploaded_file)
-    else:
-        transcript = ""
-    return transcript
+        stringio = StringIO(uploaded_file.getvalue().decode("utf-8", errors="ignore"))
+        return stringio.read()
+
+    if uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        file_bytes = BytesIO(uploaded_file.getvalue())
+        doc = Document(file_bytes)
+        return "\n".join(p.text for p in doc.paragraphs)
+
+    return ""
 
 
 def main():
@@ -117,7 +118,6 @@ def main():
                     st.session_state["all_chunk_sources"] = all_chunk_sources
                     st.session_state["all_transcripts"] = all_transcripts
 
-            vectordb = st.session_state["vectordb"]
             all_chunks = st.session_state["all_chunks"]
             embeddings_model = st.session_state["embeddings_model"]
             all_chunk_sources = st.session_state["all_chunk_sources"]
@@ -160,6 +160,7 @@ def main():
                         f"</div>",
                         unsafe_allow_html=True,
                     )
+
                     # Body (no repeated headline)
                     st.write(body)
 
