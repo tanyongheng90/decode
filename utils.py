@@ -1,50 +1,40 @@
-# utils.py
-
 import re
 from io import BytesIO
 from docx import Document
 from sklearn.metrics.pairwise import cosine_similarity
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain_openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
 from openai import OpenAI
 
 
-def chunk_embed_store_transcript(transcript_text, persist_dir="./chroma_db"):
+def chunk_embed_store_transcript(transcript_text):
     """
     Splits transcript into chunks, generates embeddings,
-    and stores them in a persistent Chroma vector database.
+    and stores them in an in-memory FAISS vector database.
     """
     text_splitter = RecursiveCharacterTextSplitter(
-        separators=["\n\n", "\n", " ", ""],
+        separators=["\n\n", "\n", " "],
         chunk_size=1000,
         chunk_overlap=100,
     )
     chunks = text_splitter.split_text(transcript_text)
 
     embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectordb = Chroma.from_texts(
+    vectordb = FAISS.from_texts(
         texts=chunks,
-        embedding=embeddings_model,
-        persist_directory=persist_dir,
-        collection_name="decode_transcripts",
+        embedding=embeddings_model
     )
-    vectordb.persist()
+
     return vectordb
 
 
-def build_retriever(persist_dir="./chroma_db"):
+def build_retriever(vectordb):
     """
-    Loads the Chroma vector database and returns a retriever.
+    Returns a retriever from an in-memory FAISS vector database.
     Prefer MMR to diversify results; otherwise fall back to k search.
     """
-    embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectordb = Chroma(
-        persist_directory=persist_dir,
-        embedding_function=embeddings_model,
-        collection_name="decode_transcripts",
-    )
     try:
         retriever = vectordb.as_retriever(
             search_type="mmr",
@@ -61,15 +51,7 @@ def get_llm_client():
 
 
 def generate_insights(client, question, docs):
-    """
-    Generates concise, numbered insights grounded in the provided excerpts.
-    - No headings/section titles.
-    - Each insight = short headline + concise explanation.
-    - If using quotes, they must be verbatim from the excerpts.
-    - Do not repeat the headline inside the explanation.
-    """
     context = "\n\n".join(doc.page_content for doc in docs)
-
     system_msg = (
         "You are an expert qualitative research analyst. "
         "Your job is to produce clear, actionable, numbered insights grounded only in the provided excerpts."
@@ -105,10 +87,6 @@ Write 3–6 insights, numbered "1., 2., 3., ...", with this exact format per ite
 
 
 def split_insights_into_points(insight_text):
-    """
-    Splits the AI-generated insights text into numbered points.
-    Handles '1.' and '1)' markers and filters out heading-like parts.
-    """
     pattern = r'(?:^|\n)\s*(?:\d+\.\s|\d+\)\s)'
     parts = re.split(pattern, insight_text)
     points = []
@@ -123,10 +101,6 @@ def split_insights_into_points(insight_text):
 
 
 def extract_insight_summaries(insights):
-    """
-    Extract concise summaries from insight points.
-    Use first sentence or first ~10 words as a fallback.
-    """
     summaries = []
     for insight in insights:
         first_sentence = insight.split('.', 1)[0].strip()
@@ -137,18 +111,10 @@ def extract_insight_summaries(insights):
 
 
 def find_supporting_quotes(points, all_chunks, embeddings_model, top_k=2):
-    """
-    Hybrid approach for alignment with inline quotes:
-      1) Extract quoted phrases from the insight and exact-match them in chunks.
-      2) If not enough matches, fall back to semantic similarity.
-    Returns a list of lists of chunk strings.
-    """
-    # Precompute chunk embeddings once
     chunk_embeds = embeddings_model.embed_documents(all_chunks)
     results = []
 
     for point in points:
-        # Extract inline quotes (curly or straight). Ignore very short snippets.
         quoted_bits = []
         for m in re.findall(r'“([^”]+)”|"([^"]+)"', point):
             frag = (m[0] or m[1]).strip()
@@ -157,7 +123,6 @@ def find_supporting_quotes(points, all_chunks, embeddings_model, top_k=2):
 
         matched = []
 
-        # 1) Exact (case-insensitive) search of quoted phrases
         if quoted_bits:
             for qb in quoted_bits:
                 qb_norm = re.sub(r'\s+', ' ', qb).strip().lower()
@@ -174,7 +139,6 @@ def find_supporting_quotes(points, all_chunks, embeddings_model, top_k=2):
                         if len(matched) >= top_k:
                             break
 
-        # 2) Fall back to semantic similarity
         if len(matched) < top_k:
             query_text = " ".join(quoted_bits) if quoted_bits else point
             q_embed = embeddings_model.embed_query(query_text)
@@ -192,14 +156,10 @@ def find_supporting_quotes(points, all_chunks, embeddings_model, top_k=2):
 
 
 def export_to_word(chat_history, supporting_quotes):
-    """
-    Exports the chat history and supporting quotes to a Word document (in-memory).
-    """
     doc = Document()
     doc.add_heading("Decode Findings Export", 0)
     for i, (q, a) in enumerate(chat_history):
         doc.add_heading(f"Q{i+1}: {q}", level=1)
-        # Keep original points in export; UI handles repetition removal
         points = split_insights_into_points(a)
         for j, point in enumerate(points):
             doc.add_heading(f"Insight {j+1}:", level=2)

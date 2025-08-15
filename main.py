@@ -1,18 +1,18 @@
 # main.py
 
 import os
-import re
 import time
+import re
+from io import BytesIO, StringIO
 from html import escape
-from io import StringIO, BytesIO
-
 import streamlit as st
 from docx import Document
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
 
 # from mysecrets import OPENAI_API_KEY
 # os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 from utils import (
     chunk_embed_store_transcript,
@@ -24,7 +24,6 @@ from utils import (
     export_to_word,
     extract_insight_summaries,
 )
-
 
 def parse_transcript(uploaded_file):
     """Reads txt or docx using python-docx (no docx2txt dependency)."""
@@ -41,12 +40,11 @@ def parse_transcript(uploaded_file):
 
 
 def main():
-    # Title + tagline
     st.markdown("<h1 style='font-weight:bold;'>💡Decode</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:gray; font-size:14px; margin-top:-10px;'>Qualitative insights you can trace, and trust</p>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Transcript upload
+    # Upload transcripts
     st.subheader("Upload raw data - interview transcript(s)")
     uploaded_files = st.file_uploader(
         "You may upload more than one", type=["docx", "txt"], accept_multiple_files=True
@@ -56,7 +54,7 @@ def main():
     if uploaded_files:
         all_transcripts = [parse_transcript(f) for f in uploaded_files]
 
-        # --- Research question: form submit + validation ---
+        # Research question form
         st.markdown("<h3 style='font-weight:bold;'>Enter Your Research Question</h3>", unsafe_allow_html=True)
         placeholder_text = (
             "What are you trying to find out from this transcript? For example, "
@@ -74,7 +72,6 @@ def main():
 
         if "research_question" in st.session_state:
             rq = st.session_state["research_question"]
-            # Styled single display of the RQ (avoid duplication below)
             st.markdown(
                 f"""
                 <div style="color:#6b7280; font-size:14px; margin:6px 0 14px 0;">
@@ -87,7 +84,8 @@ def main():
                 unsafe_allow_html=True,
             )
 
-            # --- Build vector store once per session ---
+            # Build or load vector store
+            embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
             if "vectordb" not in st.session_state:
                 with st.spinner("Processing transcripts and generating embeddings..."):
                     all_chunks = []
@@ -103,27 +101,25 @@ def main():
                         all_chunk_sources.extend([idx] * len(chunks))
                         time.sleep(0.05)
 
-                    embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-
-                    from langchain.vectorstores import Chroma
-                    vectordb = Chroma.from_texts(
+                    # Create FAISS vector store
+                    vectordb = FAISS.from_texts(
                         texts=all_chunks,
                         embedding=embeddings_model,
-                        persist_directory="./chroma_db",
-                        collection_name="decode_transcripts",
                     )
-                    vectordb.persist()
+                    vectordb.save_local("vectordb")  # save index locally
+
                     st.session_state["vectordb"] = vectordb
                     st.session_state["all_chunks"] = all_chunks
                     st.session_state["embeddings_model"] = embeddings_model
                     st.session_state["all_chunk_sources"] = all_chunk_sources
                     st.session_state["all_transcripts"] = all_transcripts
+            else:
+                vectordb = st.session_state["vectordb"]
+                all_chunks = st.session_state["all_chunks"]
+                embeddings_model = st.session_state["embeddings_model"]
+                all_chunk_sources = st.session_state["all_chunk_sources"]
 
-            all_chunks = st.session_state["all_chunks"]
-            embeddings_model = st.session_state["embeddings_model"]
-            all_chunk_sources = st.session_state["all_chunk_sources"]
-
-            retriever = build_retriever()
+            retriever = build_retriever(st.session_state["vectordb"])
             client = get_llm_client()
 
             relevant_docs = retriever.get_relevant_documents(rq)
@@ -140,11 +136,9 @@ def main():
             for i, point in enumerate(insight_points):
                 summary = summaries[i].strip(" *")
 
-                # Remove summary from body even if bolded/punctuated
                 summary_pattern = re.compile(r'^(\*\*)?' + re.escape(summary) + r'(\*\*)?[\s:.\-–—]*', re.IGNORECASE)
                 body = summary_pattern.sub('', point, count=1).lstrip('\n :.-–—')
 
-                # Map quotes back to transcript indices for participant count
                 participant_indices = set()
                 for quote in supporting_quotes[i]:
                     try:
@@ -154,26 +148,19 @@ def main():
                         pass
 
                 with st.expander(f"**Insight {i+1}: {summary}**"):
-                    # Subtle linkage to the research question
                     st.markdown(
                         f"<div style='color:#6b7280; font-size:13px; margin:-2px 0 10px 0;'>"
                         f"In response to: <em>{escape(rq)}</em>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-
-                    # Body (no repeated headline)
                     st.write(body)
-
-                    # Mentioned by
                     st.markdown(
                         f"<span style='color: gray; font-size: 13px;'>"
                         f"Mentioned by: {len(participant_indices)} participant{'s' if len(participant_indices) != 1 else ''}"
                         f"</span>",
                         unsafe_allow_html=True,
                     )
-
-                    # Supporting quotes (clean rendering)
                     st.markdown("**Supporting quotes:**")
 
                     def render_quote(raw_quote: str):
@@ -182,7 +169,6 @@ def main():
                         timestamp = None
                         text = q
 
-                        # If first line is a standalone timestamp
                         if lines and re.match(r'^\d{2}:\d{2}:\d{2}$', lines[0].strip()):
                             timestamp = lines[0].strip()
                             text = "\n".join(lines[1:]).strip()
@@ -192,10 +178,8 @@ def main():
                                 timestamp = m.group(1)
                                 text = m.group(2).strip()
 
-                        # Remove speaker labels
                         text = re.sub(r'^(Speaker\s*\d+\s*:?)\s*', '', text, flags=re.IGNORECASE)
 
-                        # Fallback excerpt if empty
                         if not text:
                             fallback = "\n".join(lines[1:]).strip() if lines else q
                             text = (fallback[:220] + "…") if len(fallback) > 220 else fallback
@@ -216,7 +200,6 @@ def main():
                                 unsafe_allow_html=True,
                             )
 
-                    # De-dup quotes
                     seen = set()
                     for quote in supporting_quotes[i]:
                         if quote in seen:
